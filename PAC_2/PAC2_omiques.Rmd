@@ -1,0 +1,1145 @@
+---
+title: "PAC2 Anàlisis de dades Òmiques"
+author: "Agnès Pérez Millan"
+date: "13/6/2020"
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+  html_document:
+    df_print: paged
+bibliography: scholar.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=6, fig.height=4)
+```
+
+\renewcommand{\tablename}{Taula}
+\renewcommand{\figurename}{Figura}
+\renewcommand{\contentsname}{Taula de continguts}
+
+\tableofcontents 
+
+S'ha creat un repositori en github (https://github.com/Agnes2/PAC2.git) per tal que el projecte es pugui clonar en un altre ordinador i reproduir.
+
+# Abstract
+
+Les dades de seqüències de RNA de teixits dels tiroides ens permet detectar el tipus d'infiltració que han patit. L’estudi realitza una normalització i filtratge de les dades, crea un model per realitzar una comparació entre el grups NIT, SFI i ELI a parelles i finalment identifica els gens diferencialment expressats de cada una de les comparacions i els que són compartits entre grups.
+
+# Objectius
+
+Els objectius que ens proposem amb aquest estudi són els següents:
+
+- Realitzar una exploració de les seqüències RNA que pertanyen a un anàlisis de tiroides amb 3 tipus d'infiltració. 
+
+- Detectar la diferenciació entre els 3 tipus d'infiltració (NIT, SFI i ELI).
+
+Per assolir aquests objectius realitzarem unes comparacions entre les diferents mostres 2 a 2.
+
+
+# Materials i Mètodes
+
+## Software
+
+Per realitzar l'anàlisi s'ha utilitzat el programari R (www.r-project.org) versió 3.6.2. En R, normalment hi ha diversos paquets i funcions per dur a terme un anàlisi específic. En el nostre cas hem fet servir majoritàriament el paquet `Bioconductor` (https://www.bioconductor.org/). S'anirà indicant quines llibreries específiques s'han fet servir a mesura que es necessitin. El codi ha estat una adaptació del codi proposat a *RNAseq pipeline - Bioconductor* [@Gonzalo20202] i *Statistical Analysis of Microarray data* [@Gonzalo2020] del campus. Tanmateix, també s'ha adaptat codi proposat des de la pàgina web de Bioconductor *Analyzing RNA-seq data with DESeq2* [@Love2020].
+
+## Dades
+
+Les dades que s’han escollit per realitzar l’anàlisi de seqüències de RNA són les d'un estudi del repositori GTEx, un repositori públic que permet estudiar la regulació i expressió gènica específica de teixits. En el nostre cas ens centrarem en el teixit dels tiroides, on tindrem 292 mostres amb tres tipus d'infiltració diferent, cada un dels grups té els següent nombre de mostres:
+
+- NIT 236 mostres
+
+- SFI 42 mostres
+
+- ELI 14 mostres
+
+Les dades es troben en dos documents: targets.csv i counts.csv, el primer conté la informació del grup, sexe, nom de l'experiment i el tipus de mostra, mentre que el segon conté el nombre de counts per la seqüència de RNA de cada experiment per cada un dels gens.
+
+D'aquest conjunt de dades escollirem solament 10 mostres per cada un dels grups i procedirem a realitzar l'anàlisi.
+
+## Mètodes
+
+### Dades
+
+De la mostra original de dades exposada en l'apartat Dades ens volem quedar amb un conjunt de 30 mostres, on tinguem 10 mostres per cada grup. Per aconseguir-ho primer separem les dades de cada un dels grups del document targets en 3 nous conjunts, un per cada grup. Un cop tenim els 3 dataframes (NIT, SFI i ELI), escollim 10 mostres aleatòries de cada un d'ells, prèviament fixem una llavor per poder reproduir l'anàlisi. 
+
+Per escollir les mostres aleatòriament procedim de la manera següent: 
+
+1. Amb la funció `sample()` escollim 10 experiments de cada un dels grups.
+
+2. Busquem els experiments escollits en el conjunt de mostres i recollim tota la seva informació.
+
+3. Finalment agrupem totes les mostres escollides amb un nou dataframe amb el document targets (com el document targets original però solament amb les 30 mostres) que serà el que farem servir per l'experiment.
+
+Un cop tenim el document targets amb 30 mostres hem de buscar aquestes 30 mostres en el document counts. Hem de tenir present que les columnes del document counts corresponen a Sample_Name intercanviant "-" per ".".
+
+### Preprocessat de les dades
+
+#### DESeqDataSet 
+
+Per poder realitzar els anàlisis necessitem tenir els documents counts i targets agrupats, per això creem un objecte DESeqDataSet que ens agrupa la informació necessària dels documents en un sol, per realitzar aquest objecte partim dels documents que volem agrupar. 
+
+Per crear l'objecte DESeqDataSet farem servir la funció `DESeqDataSetFromMatrix` de la llibreria *DESeq2* [@DESeq2014]. Aquesta funció necessita uns documents d'entrada molt característics, és per això que realitzem unes modificacions als nostres per tal de poder-los introduir. Els paràmetres de la funció i les modificacions de targets i counts necessàries són les que s'exposen:
+
+1. Document counts té com index el nom del gen Ensembl, la columna amb aquesta informació desapareix i passa a ser l'índex. S'han de modificar els codis Ensembl ja que en alguns casos hi ha un punt a la penúltima posició que no és correcte, aquest i tot el que hi ha a la seva dreta s'elimina per poder realitzar les anotacions correctament. El document creat serà el `countData` de la funció.
+
+2. Document targets té com index Sample_Name intercanviant "-" per ".", de tal manera que el índex d'aquest dataframe és equivalent a les columnes de `countData` que és un requisit de la funció. A més a més, creem la variable Group com factor. El document creat serà el `colData` de la funció.
+
+3. El disseny de la funció serà la variable Group, que és on s'indiquen els 3 grups diferents que tenim.
+
+```{r, echo = TRUE, eval=FALSE}
+#DESeqDataSet OBJECT
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                                  colData = targets,
+                                  design = ~ Group)
+```
+
+#### Filtratge i normalització
+
+El document counts pot contenir files amb un elevat nombre de 0, aquest fet indica que aquests gens no ens aporten gaire informació de l'expressió d'aquest, i ens faran que l'anàlisi necessiti més temps de càlcul. Per tant, apliquem un filtre on eliminarem les files que no continguin cap count o solament un, per augmentar la rapidesa de l'anàlisi.
+
+Les dades es normalitzen amb factor de mida "geomètric" (estimate Size Factors) amb la funció `estimateSizeFactors()` amb el mètode del ratio de la mediana (median ratio method) [@VST2010].
+
+#### Anàlisis descriptiu
+
+Volem estabilitzar la variància entre les mostres, que en el nostre cas al tenir un estudi de RNA-seq counts creix segons la mitjana. Amb això volem aconseguir tenir els counts homoscedastiques, per tal de poder visualitzar les dades més clarament. Aquest pas es realitza per fer l'anàlisi descriptiu de les dades, però no per fer les comparacions de les hipòtesis, on s'introdueixen les dades normalitzades i no pas les transformades. 
+
+Per realitzar aquesta transformació de les dades hi ha diversos mètodes, en el nostre estudi farem servir el mètode VST [@VST2010] amb la funció `vst()` ja que tenim una base de dades mitjana (n=30), és més ràpid computacionalment i és menys sensible als outliers de counts alts que altres mètodes. 
+
+L'anàlisi descriptiu té com objectiu detectar possibles outliers en la mostra, tot aquest anàlisis es realitza amb les dades transformades per poder visualitzar-les millor en els gràfics.
+
+Avaluem la similitud global de les mostres, és a dir, quines mostres són semblants entre si i quines són diferents. Per tal d'assegurar-nos que els 3 grups que presenta el nostre estudi es diferencien entre ells. Els resultats es presenten en un heatmap de distàncies on es mostra l'agrupació en cluster.
+
+Es realitza un gràfic PCA on les mostres estan representades en 2D, on es representa la primera i la segona component principal, per poder visualitzar l'efecte global de les covariants i els efectes de l'experiment entre els grups.
+
+Finalment, agrupem els 10 gens més altament variables entre mostres en un heatmap amb cluster. 
+
+### Identificació de gens diferencialment expressats
+
+Un cop tenim el conjunt de dades adequat, volem estudiar si tenim diferències entre els diferents grups (NIT, ELI i SFI). Amb l'objecte DESeqDataSet podem realitzar un model per identificar els gens diferencialment expressats amb la funció `results()` on s'especifica els grups que volem comparar. En els nostre cas, realitzarem les 3 comparacions següents: NIT vs ELI, SFI vs NIT i ELI vs SFI. Aquest anàlisi ens permetrà determinar els gens expressats diferencialment per comparar l’expressió gènica entre els grups estudiats.
+
+```{r, echo = TRUE, eval=FALSE}
+res1 <- results(dds, contrast=c("Group","NIT","ELI"))
+res2 <- results(dds, contrast=c("Group","NIT","SFI"))
+res3 <- results(dds, contrast=c("Group","ELI","SFI"))
+```
+
+Primer es crea un model que retornar el canvi log2 fold, p-values, les p-values ajustades entre d'altres, així podem identificar els gens que estiguin diferencialment expressats en contrasts amb els que no. Els valors de p-value ajustats per tot l'estudi estan ajustats segons el mètode de Benjamini & Hochberg [@Benjamini1995], que permet controlar la taxa de falsos descobriments.
+
+Per reduir els canvis de log2 fold per a la comparació de mostres dels tres tipus d’estimadors de reducció que conté DESeq2, s'ha aplicat el mètode ashr [@Stephens2016] amb la funció `lfcShrink()` del paquet `ashr` [@ashr2020]. El mètode implementa un enfocament empíric de Bayes per a proves d’hipòtesis a gran escala i estimació de la taxa de fals descobriment (FDR).
+
+```{r, echo = TRUE, eval=FALSE}
+# SHRINKING
+res1 <- lfcShrink(dds, contrast=c("Group","NIT","ELI"), type="ashr")
+res2 <- lfcShrink(dds, contrast=c("Group","NIT","SFI"), type="ashr")
+res3 <- lfcShrink(dds, contrast=c("Group","ELI","SFI"), type="ashr")
+```
+
+Per visualitzar els resultats gràficament realitzem els plots MA per cada una de les comparacions amb la funció `plotMA()`. Aquests proporcionen una visió general per a la distribució dels coeficients estimats en el model entre tots els gens. Mostren els canvis de log2 fold per sobre de la mitjana dels recomptes (counts) normalitzats per a totes les mostres del DESeqDataSet. 
+
+### Anotació dels resultats
+
+Un cop tenim els gens diferencialment expressats hem de relacionar el ID Ensembl que tenim del document counts amb el nom corresponent, volem identificar els gens per facilitar la interpretació dels resultats, és a dir, realitzar l’anotació dels valors obtinguts. La correspondència entre ID Ensembl i els noms més coneguts: el identificador d’ENTREZ (ENTREZID) i el nom del gen (símbol del gen). Per poder realitzar es fa servir `org.Hs.eg.db` [@genome2019] que és el paquet que conté l’anotació corresponent al nostre estudi i la funció `mapIds()`.
+
+Per visualitzar els gens més diferencialment expressats els representarem en un volcanoplot, on l’eix de les abscisses tenim els canvis d’expressió (escala logarítmica) i en l’eix de l’ordenada el valor de p-value. Aquests gràfic permet visualitzar fàcilment canvis en conjunts de dades extenses com la nostra.
+
+
+### Comparació entre diferents comparacions
+
+En l'estudi realitzem 3 comparacions, així que volem saber quins són els gens diferencialment expressats que coincideixen i els que no en cada una de les comparacions. Ja que depèn de l'estudi que s'estigui realitzant ens interessaran uns o uns altres. Per obtenir aquesta informació utilitzarem el paquet limma [@limma], on els gens diferencialment expressats seran aquells amb un valor inferior de 0.05 de p-value ajustat. Els resultats es mostren en un diagrama de Venn.
+
+### Anàlisi de significació biològica
+
+A través de l’estadística és possible suggerir alguna interpretació dels resultats obtinguts, realitzant un “enrichment analysis” amb el paquet clusterProfiler [@clusterProfiler], per realitzar aquest anàlisis necessitem un cert nombre de gens perquè sigui fiable. Per tant, agafarem FDR < 0.15 per d’identificar els gens diferencialment expressats per ser més permissius. Aquest fet ens permetrà augmentar el nombre de gens però alhora mantenir una classificació de gens diferencialment expressats coherent. Com a resultat d’aquest anàlisis obtindrem un gràfic de barres amb les millors “enriched pathways” i un gràfic de xarxes dels “enriched pathways” amb cada un dels gens. Per realitzar aquest anàlisi s’ha tingut en compte tots els gens possibles de l’anotació.
+
+
+# Resultats
+
+## Dades
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+################################# LLIBRERIES ######################################
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(pheatmap)
+library(RColorBrewer)
+library(magrittr)
+library(BiocManager)
+
+library(DESeq2)
+library(apeglm)
+library(ashr)
+library(EnhancedVolcano)
+library(genefilter)
+
+################################# DADES ######################################
+
+#DOCUMENT TARGETS:
+targetsoriginal <- read.csv("./data/targets.csv", header = TRUE, sep = ",") 
+
+#DOCUMENT COUNTS:
+countsoriginal <- read.csv("./data/counts.csv", header = TRUE, sep = ";") 
+
+#ESCOLLIR MOSTRES ALEATORIES:
+#Dataframes targets per cada grup
+targetsNIT<-subset(targetsoriginal,targetsoriginal$Group=='NIT') #targets grup NIT
+targetsSFI<-subset(targetsoriginal,targetsoriginal$Group=='SFI') #targets grup SFI
+targetsELI<-subset(targetsoriginal,targetsoriginal$Group=='ELI') #targets grup ELI
+
+#Escollim 10 mostres aletoriament de cada grup
+
+set.seed('12345') #llavor
+
+expNIT<-sample(targetsNIT$Experiment,10) #10 mostres NIT
+expSFI<-sample(targetsSFI$Experiment,10) #10 mostres SFI
+expELI<-sample(targetsELI$Experiment,10) #10 mostres ELI
+
+#Recopilem informació de targets per les 30 mostres escollides
+
+mNIT<-data.frame()
+mSFI<-data.frame()
+mELI<-data.frame()
+
+
+for(i in 1:10){
+  #NIT targets informació
+  mNITaux<-subset(targetsNIT,targetsNIT$Experiment==expNIT[i])
+  mNIT<-rbind(mNIT,mNITaux)
+  
+  #SFI targets informació
+  mSFIaux<-subset(targetsSFI,targetsSFI$Experiment==expSFI[i])
+  mSFI<-rbind(mSFI,mSFIaux)
+  
+  #ELI targets informació
+  mELIaux<-subset(targetsELI,targetsELI$Experiment==expELI[i])
+  mELI<-rbind(mELI,mELIaux)
+  
+}
+
+#Creem doocument target per les 30 mostres
+targets<-rbind(mNIT,mSFI,mELI) 
+rownames(targets) <- 1:nrow(targets) #reindex
+```
+
+Partim d'una base de dades de 292 mostres formada per 3 grups, en l'estudi solament estudiarem 10 mostres de cada un dels grups que han estat escollides de manera aleatòria. En la taula 1 podem veure el conjunt de dades estudiades i el grup a que pertanyen, observem que tenim 10 mostres per cada un dels grups (NIT, SFI i ELI).
+
+```{r, echo = FALSE, eval = TRUE}
+grups <- select(targets, ShortName, Group, Sample_Name)
+knitr::kable(grups, booktabs = TRUE,
+             caption = 'Mostra les dades estudiades, indicant el grup i el nom')
+```
+
+Amb les mostres escollides de targets les busquem per el document counts, que també tindrà 30 columnes solament corresponents a les mostres escollides. 
+
+El document targets i counts per les 30 mostres seran els documents que farem servir per crear l'objecte DESeqDataSet amb el que realitzarem l'anàlisi.
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+
+#ESCOLLIR MOSTRES ALEATORIES COUNTS:
+counts<-select(countsoriginal, X)
+SampleName<-targets$Sample_Name #30 mostres escollides
+
+for (i in 1:30){
+  x<-as.character(SampleName[i]) 
+  SampleNamex<-chartr("-", ".", x) #intercanviem - per .
+  countsaux<-select(countsoriginal, SampleNamex) #busquem experiment en counts original
+  counts<-cbind(counts,countsaux) #doocument counts per les 30 mostres
+}
+
+################################# DESeqDataSet  ######################################
+
+#DOCUMENT TARGETS --> colData
+x<-as.character(targets$Sample_Name) 
+targets$Sample_Name<-chartr("-", ".", x) #intercanviem - per .
+#index Sample_Name=columnes counts
+targets <- data.frame(targets,row.names=targets$Sample_Name) 
+targets$Group<-as.factor(targets$Group)
+
+#DOCUMENT COUNTS --> countData
+counts <- data.frame(counts,row.names=counts$X) #index gen Ensembl
+counts<-select(counts, -X)
+tmp=gsub("\\..*","",row.names(counts)) #eliminem punt codi Ensembl
+counts <- data.frame(counts,row.names=tmp) #index gen Ensembl
+
+#DESeqDataSet OBJECT
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                                  colData = targets,
+                                  design = ~ Group)
+
+```
+
+
+## Preprocessat de les dades
+
+### Filtratge i normalització
+
+Observant el document counts podem veure que hi ha forces files que conten un elevat nombre de 0. Per tant, aplicant el filtre on s'eliminen les files que no continguin cap count o solament un passem de tenir 56202 gens a 43573. Les dades han estat normalitzades.
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+#FILTRE
+nrow(dds) #orginal
+dds <- dds[rowSums(counts(dds)) > 1, ] #filtratge
+nrow(dds) #després filtre
+
+#NORMALITZACIÓ
+dds <- estimateSizeFactors(dds, type = c("ratio")) 
+```
+
+### Anàlisis descriptiu
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+################################# ANÀLISIS DESCRIPTIU  ######################################
+vsd <- vst(dds, blind = FALSE) #VST
+```
+
+```{r, echo = FALSE,warning=FALSE, fig.cap = "Boxplot counts originals"}
+#BOXPLOT
+boxplot(assay(dds), names=dds$ShortName, las=2, main='Boxplot Counts')
+```
+
+```{r, echo = FALSE,warning=FALSE, fig.cap = "Boxplot counts transformats"}
+boxplot(assay(vsd), names=dds$ShortName, las=2, main='Boxplot Counts', 
+        col=c(rep("red", 10), rep("blue", 10), rep("orange", 10) ))
+```
+
+La figura 1 i 2 mostren l'efecte de transformar les dades estabilitzant la variància entre les mostres. En la figura 1 no s'ha fet cap transformació, per tant, s'observa una gran variància que no ens permet veure el valor de les mostres. En canvi, en la figura 2, un cop s'ha realitzat la transformació podem veure clarament els valors dels counts.
+
+```{r, echo = FALSE,warning=FALSE, fig.cap = "Heatmap de distàncies"}
+#HEATMAP DISTÀNCIES
+sampleDists <- dist(t(assay(vsd))) #Distàncies
+
+#Heatmap
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$ShortName, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Reds")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors,
+         main="Distàncies per cada una de les mostres")
+```
+
+El heatmap de la matriu de distàncies (figura 3) ens dóna una visió general de les similituds i les diferències entre les mostres. S'observa que el grup ELI està clarament diferenciat dels altres, però els grups NIT i SFI comparteixen forces similituds.
+
+```{r, echo = FALSE,warning=FALSE, fig.cap = "PCA per les dades"}
+#PCA
+plotPCA(vsd, intgroup = c("Group"))
+```
+
+En la figura 4 que mostra el gràfic PCA podem observar que tots els grups presenten la mateixa variabilitat, per tant, podem crear el model amb totes les dades i després fer servir els contrastos per realitzar les comparacions entre grups. Observem que la primera component principal explica gran part de la variància 65%.
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Heatmap dels gens amb més variació entre mostres"}
+
+#HEATMAP GENS MÉS VARIABLES
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 10)
+
+mat  <- assay(vsd)[topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+
+anno <- as.data.frame(colData(vsd)[,"Group"])
+rownames(anno) <- colnames(mat)
+
+colnames(anno)<-c('Group')
+
+pheatmap(mat, annotation_col = anno, show_colnames=FALSE, main="Gens amb més variació")
+```
+
+Els 10 gens amb la major variació entre mostres es mostren en la figura 5. S'observa que els grups NIT i SFI comparteixen forces similituds, com ja havíem vist en altres gràfics.
+
+Amb l'anàlisis descriptiu realitzat no observem cap possible outlier. També podem veure unes certes similituds entre els grups NIT i SFI que s'hauran de tenir en compte alhora de comparar-los, ja que podria ser que no hi hagin resultats significatius entre aquests dos grups.
+
+## Identificació de gens diferencialment expressats
+
+El model ens retornar valors com els canvis log2 fold, p-values, p-values ajustades entre d'altres, així podem identificar els gens diferencialment expressats en contrasts amb els que no. 
+
+Considerant acceptable una fracció del 10% de falsos positius, podem considerar tots els gens amb un p-value ajustat per sota del 10% = 0.1 com a significatius obtenim els següents resultats per cada una de les comparacions:
+
+- 6635 gens diferencialment expressats per la comparació NIT vs ELI.
+
+- 94 gens diferencialment expressats per la comparació NIT vs SFI.
+
+- 4765 gens diferencialment expressats per la comparació ELI vs SFI.
+
+Podem observar que la comparació NIT vs SFI presenta molts menys gens diferencialment significatius que les altres dues comparacions, aquests resultats ja eren esperats degut a que en l'anàlisi descriptiu ja hem observat certa similitud entre els grups NIT i SFI.
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+########################### GENS DIFERENCIALMENT EXPRESSATS ##############################
+
+dds <- DESeq(dds, parallel =TRUE)
+
+#COMPARACIONS
+res1 <- results(dds, contrast=c("Group","NIT","ELI"))
+res2 <- results(dds, contrast=c("Group","NIT","SFI"))
+res3 <- results(dds, contrast=c("Group","ELI","SFI"))
+
+#FALSOS POSITIUS
+sum(res1$padj < 0.1, na.rm=TRUE)
+sum(res2$padj < 0.1, na.rm=TRUE)
+sum(res3$padj < 0.1, na.rm=TRUE)
+```
+
+Classifiquem els resultats segons l'estimació del canvi log2 fold per obtenir els gens significatius amb la regulació de baixada (down-regulation) més forta, que es mostren per cada una de les comparacions:
+
+- Per NIT vs ELI:
+
+```{r,message=FALSE, echo = FALSE, warning=FALSE}
+#DOWN-REGULATION
+
+res1Sig <- subset(res1, padj < 0.1)
+head(res1Sig[order(res1Sig$log2FoldChange), ])
+```
+
+- Per NIT vs SFI:
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+res2Sig <- subset(res2, padj < 0.1)
+head(res2Sig[order(res2Sig$log2FoldChange), ])
+```
+
+- Per ELI vs SFI:
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+res3Sig <- subset(res3, padj < 0.1)
+head(res3Sig[order(res3Sig$log2FoldChange), ])
+```
+
+Classifiquem els resultats segons l'estimació del canvi log2 fold per obtenir els gens significatius amb la regulació de pujada (up-regulation) més forta, que es mostren per cada una de les comparacions:
+
+- Per NIT vs ELI:
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+#UP-REGULATION
+head(res1Sig[order(res1Sig$log2FoldChange, decreasing = TRUE), ])
+```
+
+- Per NIT vs SFI:
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+head(res2Sig[order(res2Sig$log2FoldChange, decreasing = TRUE), ])
+```
+
+- Per ELI vs SFI:
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+head(res3Sig[order(res3Sig$log2FoldChange, decreasing = TRUE), ])
+```
+
+Un cop realitzada la reducció dels canvis de log2 fold amb el mètode ashr realitzem els plots MA per cada una de les comparacions (figura 6) per visualitzar els resultats. Aquests ens mostren els canvis de log2 fold per sobre de la mitjana dels recomptes (counts) normalitzats per a totes les mostres. Els punts en vermell indiquen p-values ajustats inferiors a 0.1. Els punts que cauen fora de la finestra es representen com a triangles apuntant cap amunt o cap avall.
+
+```{r,message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+# SHRINKING
+res1 <- lfcShrink(dds, contrast=c("Group","NIT","ELI"), type="ashr")
+res2 <- lfcShrink(dds, contrast=c("Group","NIT","SFI"), type="ashr")
+res3 <- lfcShrink(dds, contrast=c("Group","ELI","SFI"), type="ashr")
+```
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Plots MA per cada una de les comparacions"}
+# PLOT MA
+par(mfrow=c(1,3))
+plotMA(res1, main="NIT vs ELI")
+plotMA(res2, main="NIT vs SFI")
+plotMA(res3, main="ELI vs SFI")
+```
+
+El plot MA per la comparació NIT vs SFI ens retorna molts pocs valors de p-value ajustat inferior a 0.1, com ja hem vist en altres gràfics ens està indicant que aquesta comparació els grups no són gaire diferents entre si.
+
+
+## Anotació dels resultats
+
+Un cop realitzem l'anotació dels gens en alguns casos no es troba el gen en la base de dades, per aquest motiu alguns dels resultats són NA. Presentem els resultats dels 6 gens més diferencialment expressats amb la anotació corresponent per cada una de les comparacions: 
+
+- Per NIT vs ELI que els 6 gens més diferencialment expressats són FCER2, TLR10, LINC00926, GAPT, RAB37 i LINC00861.
+- Per NIT vs SFI que els 6 gens més diferencialment expressats identificats són ANKRD36BP2, CALCA, FER1L4, CHGA, IGLL5 i SLAMF7.
+- Per ELI vs SFI que els 6 gens més diferencialment expressats són GAPT, SPIB, LINC00926, NIBAN3, RASGRP2 i FCER2.
+
+Observem que alguns dels 6 gens més diferencialment expressats per diferents comparacions coincideixen.
+
+Finalment, podem representar en un volcanoplot dels gens diferencialment expressats per cada una de les comparacions (figures 7, 8 i 9). 
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+library(org.Hs.eg.db)
+
+#IDENTIFIQUEM GENS
+res1$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res1),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res1$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res1),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res2$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res2),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res2$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res2),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res3$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res3),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res3$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res3),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+#GENS DIFERENCIALMENT SIGNIFICANTS
+res1Ordered <- res1[order(res1$padj),]
+head(res1Ordered)
+
+res2Ordered <- res2[order(res2$padj),]
+head(res2Ordered)
+
+res3Ordered <- res3[order(res3$padj),]
+head(res3Ordered)
+
+#GUARDEM RESULTATS
+res1OrderedDF <- as.data.frame(res1Ordered)
+write.csv(res1OrderedDF, file = "./results/resultsNITvsELI.csv")
+
+res2OrderedDF <- as.data.frame(res2Ordered)
+write.csv(res2OrderedDF, file = "./results/resultsNITvsSFI.csv")
+
+res3OrderedDF <- as.data.frame(res3Ordered)
+write.csv(res3OrderedDF, file = "./results/resultsELIvsSFI.csv")
+
+#VOLCANOPLOT
+symbols1<-c(res1$symbol)
+attr(symbols1, "names") <- NULL
+
+symbols2<-c(res2$symbol)
+attr(symbols2, "names") <- NULL
+
+symbols3<-c(res3$symbol)
+attr(symbols3, "names") <- NULL
+```
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Volcanoplot per NIT vs ELI"}
+#VOLCANOPLOT
+EnhancedVolcano(res1,
+    title = 'Volcanoplot NIT vs ELI',
+    lab = symbols1,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+```
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Volcanoplot per NIT vs SFI"}
+EnhancedVolcano(res2,
+    title = 'Volcanoplot NIT vs SFI',
+    lab = symbols2,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+```
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Volcanoplot per ELI vs SFI"}
+EnhancedVolcano(res3,
+    title = 'Volcanoplot ELI vs SFI',
+    lab = symbols3,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+```
+
+
+## Comparació entre diferents comparacions
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+
+########################### COMPARACIONS MÚLTIPLES ##############################
+library(limma)
+library(clusterProfiler)
+
+#CERCA DELS GENS DIFERENCIALMENT EXPRESSATS
+res1sig <- subset(res1, res1$padj <= 0.05)
+res1sig.genes <- row.names(res1sig)
+
+res2sig <- subset(res2, res2$padj <= 0.05)
+res2sig.genes <- row.names(res2sig)
+
+res3sig <- subset(res3, res3$padj <= 0.05)
+res3sig.genes <- row.names(res3sig)
+
+comb <- c(res1sig.genes, res2sig.genes, res3sig.genes)
+
+res1sig.genes.2 <- comb %in% res1sig.genes
+res2sig.genes.2 <- comb %in% res2sig.genes
+res3sig.genes.2 <- comb %in% res3sig.genes
+```
+
+La figura 10 ens mostra el diagrama de Venn per les 3 comparacions, podem observar que les comparacions NIT vs ELI i ELI vs SFI comparteixen un elevat nombre de gens diferencialment expressats entre ells, però també tenen un nombre important de gens diferencialment expressats que són únics de la comparació. En canvi la comparació NIT vs SFI pràcticament tots els gens diferencialment expressats trobats coincideixen amb els trobats per les altres comparacions.
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Diagrama de Venn per les 3 comparacions "}
+#DIAGRAMA VENN
+counts.5 <- cbind(res1sig.genes.2,  res2sig.genes.2, res3sig.genes.2)
+results.5 <- vennCounts(counts.5)
+vennDiagram(results.5, cex = 1, names = c("NIT vs ELI","NIT vs SFI", "ELI vs SFI"), 
+            circle.col = c("red", "blue", "orange"))
+```
+
+
+## Anàlisi de significació biològica
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+########################### ENRICHED PATHWAYS ##############################
+
+#Conevrtim a datframe per introduir a enrichGO
+res1d<-as.data.frame(res1)
+res2d<-as.data.frame(res2)
+res3d<-as.data.frame(res3)
+
+#ENRICHED PATHWAYS
+universe1 <- res1d %>% pull(entrez)
+sigGenes1 <- res1d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go1 <- enrichGO(
+  gene= sigGenes1,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe1,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+
+universe2 <- res2d %>% pull(entrez)
+sigGenes2 <- res2d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go2 <- enrichGO(
+  gene= sigGenes2,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe2,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+
+
+universe3 <- res3d %>% pull(entrez)
+sigGenes3 <- res3d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go3 <- enrichGO(
+  gene= sigGenes3,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe3,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+```
+
+Les figures 11 i 14 ens mostren els enriched pathways trobats per NIT vs ELI, on podem destacar els més significatius:
+
+- T cell activation
+
+- Regulation of leukocyte activation
+
+- Leukocyte differntiation
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Barplot per els enriched pathways per NIT vs ELI"}
+#GRÀFIC BARRES
+barplot(enrich_go1, title="NIT vs ELI")
+```
+
+Les figures 12 i 15 ens mostren els enriched pathways trobats per NIT vs SFI, on podem destacar els més significatius:
+
+- Muscle contraction
+
+- Muscle system process
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Barplot per els enriched pathways per NIT vs SFI"}
+barplot(enrich_go2, title="NIT vs SFI")
+```
+
+Per aquesta comparació si fem FDR<0.1 per detectar gens diferencialment expressats que és una classificació habitual (i feta servir en aquest anàlisis) no es troba cap enriched pathways. En canvi, el fet d'haver escollir FDR<0.15 per detectar els gens diferencialment expressats que és més permissiu però coherent ens permet trobar enriched pathways per les 3 comparacions.
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Barplot per els enriched pathways per ELI vs SFI"}
+barplot(enrich_go3, title="ELI vs SFI")
+```
+
+Les figures 13 i 16 ens mostren els enriched pathways trobats per ELI vs SFI, on podem destacar els més significatius:
+
+- Adaptive immune response
+
+- T cell activation
+
+- Regulation of leukocyte activation
+
+- Regulation of lymphocyte activation
+
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Enriched pathways per NIT vs ELI"}
+#GRÀFIC XARXES
+emapplot(enrich_go1, title="NIT vs ELI")
+```
+
+Observem que alguns dels enriched pathways trobats per NIT vs ELI i ELI vs SFI coincideixen.
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Enriched pathways per NIT vs SFI"}
+emapplot(enrich_go2, title="NIT vs SFI")
+```
+
+```{r, echo = FALSE, warning=FALSE, fig.cap = "Enriched pathways per ELI vs SFI"}
+emapplot(enrich_go3, title="ELI vs SFI")
+```
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE, results='hide'}
+#GUARDAR PLOT PDF
+
+#guardar en pdf per veure millor
+pdf(file=paste0("./results/","cnetplotPathwayNITvsELI.pdf"))
+print(emapplot(enrich_go1))
+
+dev.off()
+
+pdf(file=paste0("./results/","cnetplotPathwayNITvsSFI.pdf"))
+print(emapplot(enrich_go2))
+
+dev.off()
+
+pdf(file=paste0("./results/","cnetplotPathwayELIvsSFI.pdf"))
+print(emapplot(enrich_go3))
+
+dev.off()
+```
+
+
+# Discussió
+
+En l’estudi crec que es poden trobar algunes limitacions sobretot de la base de dades:
+
+- Es seleccionen 30 mostres de 292 de manera aleatòria, l'estudi pot estar influenciat per les mostres seleccionades. És a dir, si tinguéssim unes altres 10 mostres d'algun dels grups podríem obtenir resultats diferents. Un clar exemple són els grups NIT i SFI per les nostres mostres són força semblants, però si agaféssim unes altres no té perquè repetir-se aquest fet.
+
+- Tenim poca N en la mostra, ja que per cada grup tenim 10 mostres. Seria un estudi més fiable si la N total fos més gran. Podríem haver agafat 14 mostres per cada grup que és el màxim que es pot agafar (el grup ELI té 14 mostres). Si no volguéssim mantenir la N de cada un dels grups constant podríem augmentar una mica més, és veritat que si augmentem la N els resultats seran més fiables, però també augmentarà el temps computacional de càlcul.
+
+# Apèndix: Codi
+
+El codi està pensat perquè tinguem un document targets.csv i un document counts.csv en la carpeta data. Tinguem una carpeta results on guardarem els resultats. Finalment, també s'han de tenir instal·lats els paquets necessaris.
+
+Cal mencionar que hi ha uns paquets que no s'importen al principi del codi com els altres, ja que si es realitza es sobreposen amb altres i modifiquen els resultats o generen un error. Per aquest motiu són importats més endavant del codi.
+
+```{r, echo = TRUE, eval=FALSE}
+
+################################# LLIBRERIES ######################################
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(pheatmap)
+library(RColorBrewer)
+library(magrittr)
+library(BiocManager)
+
+library(DESeq2)
+library(ashr)
+library(EnhancedVolcano)
+library(genefilter)
+
+################################# DADES ######################################
+
+#DOCUMENT TARGETS:
+targetsoriginal <- read.csv("./data/targets.csv", header = TRUE, sep = ",") 
+
+#DOCUMENT COUNTS:
+countsoriginal <- read.csv("./data/counts.csv", header = TRUE, sep = ";") 
+
+#ESCOLLIR MOSTRES ALEATORIES TARGETS:
+#Dataframes targets per cada grup
+targetsNIT<-subset(targetsoriginal,targetsoriginal$Group=='NIT') #targets grup NIT
+targetsSFI<-subset(targetsoriginal,targetsoriginal$Group=='SFI') #targets grup SFI
+targetsELI<-subset(targetsoriginal,targetsoriginal$Group=='ELI') #targets grup ELI
+
+#Escollim 10 mostres aletoriament de cada grup
+
+set.seed('12345') #llavor
+
+expNIT<-sample(targetsNIT$Experiment,10) #10 mostres NIT
+expSFI<-sample(targetsSFI$Experiment,10) #10 mostres SFI
+expELI<-sample(targetsELI$Experiment,10) #10 mostres ELI
+
+#Recopilem informació de targets per les 30 mostres escollides
+
+mNIT<-data.frame()
+mSFI<-data.frame()
+mELI<-data.frame()
+
+
+for(i in 1:10){
+  #NIT targets informació
+  mNITaux<-subset(targetsNIT,targetsNIT$Experiment==expNIT[i])
+  mNIT<-rbind(mNIT,mNITaux)
+  
+  #SFI targets informació
+  mSFIaux<-subset(targetsSFI,targetsSFI$Experiment==expSFI[i])
+  mSFI<-rbind(mSFI,mSFIaux)
+  
+  #ELI targets informació
+  mELIaux<-subset(targetsELI,targetsELI$Experiment==expELI[i])
+  mELI<-rbind(mELI,mELIaux)
+  
+}
+
+#Creem doocument target per les 30 mostres
+targets<-rbind(mNIT,mSFI,mELI) 
+rownames(targets) <- 1:nrow(targets) #reindex
+
+#Taula dades targets escollides
+grups <- select(targets, ShortName, Group, Sample_Name)
+knitr::kable(grups, booktabs = TRUE,
+             caption = 'Mostra les dades estudiades, indicant el grup i el nom')
+
+#ESCOLLIR MOSTRES ALEATORIES COUNTS:
+counts<-select(countsoriginal, X)
+SampleName<-targets$Sample_Name #30 mostres escollides
+
+for (i in 1:30){
+  x<-as.character(SampleName[i]) 
+  SampleNamex<-chartr("-", ".", x) #intercanviem - per .
+  countsaux<-select(countsoriginal, SampleNamex) #busquem experiment en counts original
+  counts<-cbind(counts,countsaux) #doocument counts per les 30 mostres
+}
+
+################################# DESeqDataSet  ######################################
+
+#DOCUMENT TARGETS --> colData
+x<-as.character(targets$Sample_Name) 
+targets$Sample_Name<-chartr("-", ".", x) #intercanviem - per .
+#index Sample_Name=columnes counts
+targets <- data.frame(targets,row.names=targets$Sample_Name) 
+targets$Group<-as.factor(targets$Group)
+
+#DOCUMENT COUNTS --> countData
+counts <- data.frame(counts,row.names=counts$X) #index gen Ensembl
+counts<-select(counts, -X)
+tmp=gsub("\\..*","",row.names(counts)) #eliminem punt codi Ensembl
+counts <- data.frame(counts,row.names=tmp) #index gen Ensembl
+
+#DESeqDataSet OBJECT
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                                  colData = targets,
+                                  design = ~ Group)
+dds
+
+
+####################### FILTRATGE I NORMALITZACIÓ  ###############################
+
+#FILTRE
+nrow(dds) #orginal
+dds <- dds[rowSums(counts(dds)) > 1, ] #filtratge
+nrow(dds) #després filtre
+
+#NORMALITZACIÓ
+dds <- estimateSizeFactors(dds, type = c("ratio")) 
+
+########################### ANÀLISIS DESCRIPTIU  ##############################
+
+vsd <- vst(dds, blind = FALSE) #VST
+
+#BOXPLOT
+boxplot(assay(dds), names=dds$ShortName, las=2, main='Boxplot Counts')
+boxplot(assay(vsd), names=dds$ShortName, las=2, main='Boxplot Counts', 
+        col=c(rep("red", 10), rep("blue", 10), rep("orange", 10) ))
+
+#HEATMAP DISTÀNCIES
+sampleDists <- dist(t(assay(vsd))) #Distàncies
+
+#Heatmap
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$ShortName, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Reds")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors,
+         main="Distàncies per cada una de les mostres")
+
+#PCA
+plotPCA(vsd, intgroup = c("Group"))
+
+#HEATMAP GENS MÉS VARIABLES
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 10)
+
+mat  <- assay(vsd)[topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+
+anno <- as.data.frame(colData(vsd)[,"Group"])
+rownames(anno) <- colnames(mat)
+
+colnames(anno)<-c('Group')
+
+pheatmap(mat, annotation_col = anno, show_colnames=FALSE, 
+         main="Gens amb més variació entre mostres")
+
+
+######################### GENS DIFERENCIALMENT EXPRESSATS ############################
+
+dds <- DESeq(dds, parallel =TRUE)
+
+#COMPARACIONS
+res1 <- results(dds, contrast=c("Group","NIT","ELI"))
+res2 <- results(dds, contrast=c("Group","NIT","SFI"))
+res3 <- results(dds, contrast=c("Group","ELI","SFI"))
+
+#FALSOS POSITIUS
+sum(res1$padj < 0.1, na.rm=TRUE)
+sum(res2$padj < 0.1, na.rm=TRUE)
+sum(res3$padj < 0.1, na.rm=TRUE)
+
+#DOWN-REGULATION
+res1Sig <- subset(res1, padj < 0.1)
+head(res1Sig[order(res1Sig$log2FoldChange), ])
+
+res2Sig <- subset(res2, padj < 0.1)
+head(res2Sig[order(res2Sig$log2FoldChange), ])
+
+res3Sig <- subset(res3, padj < 0.1)
+head(res3Sig[order(res3Sig$log2FoldChange), ])
+
+#UP-REGULATION
+head(res1Sig[order(res1Sig$log2FoldChange, decreasing = TRUE), ])
+head(res2Sig[order(res2Sig$log2FoldChange, decreasing = TRUE), ])
+head(res3Sig[order(res3Sig$log2FoldChange, decreasing = TRUE), ])
+
+# SHRINKING
+res1 <- lfcShrink(dds, contrast=c("Group","NIT","ELI"), type="ashr")
+res2 <- lfcShrink(dds, contrast=c("Group","NIT","SFI"), type="ashr")
+res3 <- lfcShrink(dds, contrast=c("Group","ELI","SFI"), type="ashr")
+
+# PLOT MA
+par(mfrow=c(1,3))
+plotMA(res1, main="NIT vs ELI")
+plotMA(res2, main="NIT vs SFI")
+plotMA(res3, main="ELI vs SFI")
+
+########################### ANOTACIÓ ##############################
+library(org.Hs.eg.db)
+
+#IDENTIFIQUEM GENS
+res1$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res1),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res1$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res1),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res2$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res2),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res2$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res2),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res3$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res3),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res3$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(res3),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+#GENS DIFERENCIALMENT SIGNIFICANTS
+res1Ordered <- res1[order(res1$padj),]
+head(res1Ordered)
+
+res2Ordered <- res2[order(res2$padj),]
+head(res2Ordered)
+
+res3Ordered <- res3[order(res3$padj),]
+head(res3Ordered)
+
+#GUARDEM RESULTATS
+res1OrderedDF <- as.data.frame(res1Ordered)
+write.csv(res1OrderedDF, file = "./results/resultsNITvsELI.csv")
+
+res2OrderedDF <- as.data.frame(res2Ordered)
+write.csv(res2OrderedDF, file = "./results/resultsNITvsSFI.csv")
+
+res3OrderedDF <- as.data.frame(res3Ordered)
+write.csv(res3OrderedDF, file = "./results/resultsELIvsSFI.csv")
+
+#VOLCANOPLOT
+symbols1<-c(res1$symbol)
+attr(symbols1, "names") <- NULL
+
+symbols2<-c(res2$symbol)
+attr(symbols2, "names") <- NULL
+
+symbols3<-c(res3$symbol)
+attr(symbols3, "names") <- NULL
+
+
+EnhancedVolcano(res1,
+    title = 'Volcanoplot NIT vs ELI',
+    lab = symbols1,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+
+EnhancedVolcano(res2,
+    title = 'Volcanoplot NIT vs SFI',
+    lab = symbols2,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+
+EnhancedVolcano(res3,
+    title = 'Volcanoplot ELI vs SFI',
+    lab = symbols3,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 10e-16,
+    FCcutoff = 1.5,
+    colAlpha = 1,
+    legendPosition = 'right')
+
+########################### COMPARACIONS MÚLTIPLES ##############################
+library(limma)
+library(clusterProfiler)
+
+#CERCA DELS GENS DIFERENCIALMENT EXPRESSATS
+res1sig <- subset(res1, res1$padj <= 0.05)
+res1sig.genes <- row.names(res1sig)
+
+res2sig <- subset(res2, res2$padj <= 0.05)
+res2sig.genes <- row.names(res2sig)
+
+res3sig <- subset(res3, res3$padj <= 0.05)
+res3sig.genes <- row.names(res3sig)
+
+comb <- c(res1sig.genes, res2sig.genes, res3sig.genes)
+
+res1sig.genes.2 <- comb %in% res1sig.genes
+res2sig.genes.2 <- comb %in% res2sig.genes
+res3sig.genes.2 <- comb %in% res3sig.genes
+
+#DIAGRAMA VENN
+counts.5 <- cbind(res1sig.genes.2,  res2sig.genes.2, res3sig.genes.2)
+results.5 <- vennCounts(counts.5)
+vennDiagram(results.5, cex = 1, names = c("NIT vs ELI","NIT vs SFI", "ELI vs SFI"), 
+            circle.col = c("red", "blue", "orange"))
+
+
+########################### ENRICHED PATHWAYS ##############################
+
+#Conevrtim a datframe per introduir a enrichGO
+res1d<-as.data.frame(res1)
+res2d<-as.data.frame(res2)
+res3d<-as.data.frame(res3)
+
+#ENRICHED PATHWAYS
+universe1 <- res1d %>% pull(entrez)
+sigGenes1 <- res1d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go1 <- enrichGO(
+  gene= sigGenes1,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe1,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+
+universe2 <- res2d %>% pull(entrez)
+sigGenes2 <- res2d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go2 <- enrichGO(
+  gene= sigGenes2,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe2,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+
+
+universe3 <- res3d %>% pull(entrez)
+sigGenes3 <- res3d %>% filter(padj < 0.15, !is.na(entrez)) %>% pull(entrez)
+enrich_go3 <- enrichGO(
+  gene= sigGenes3,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  universe = universe3,
+  qvalueCutoff = 0.05,
+  readable=TRUE
+)
+
+#GRÀFIC BARRES
+barplot(enrich_go1, title="NIT vs ELI")
+barplot(enrich_go2, title="NIT vs SFI")
+barplot(enrich_go3, title="ELI vs SFI")
+
+#GRÀFIC XARXES
+emapplot(enrich_go1, title="NIT vs ELI")
+emapplot(enrich_go2, title="NIT vs SFI")
+emapplot(enrich_go3, title="ELI vs SFI")
+
+#GUARDAR PLOT PDF
+
+#guardar en pdf per veure millor
+pdf(file=paste0("./results/","cnetplotPathwayNITvsELI.pdf"))
+print(emapplot(enrich_go1))
+
+dev.off()
+
+pdf(file=paste0("./results/","cnetplotPathwayNITvsSFI.pdf"))
+print(emapplot(enrich_go2))
+
+dev.off()
+
+pdf(file=paste0("./results/","cnetplotPathwayELIvsSFI.pdf"))
+print(emapplot(enrich_go3))
+
+dev.off()
+```
+
+
+# Referències
+
